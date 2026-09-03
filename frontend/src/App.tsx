@@ -47,8 +47,8 @@ function App() {
     formData.append('file', file);
 
     try {
-      // Assuming backend runs on localhost:8000
-      const response = await fetch('http://localhost:8000/api/analyze', {
+      const apiUrl = import.meta.env.VITE_API_URL || '/api/analyze';
+      const response = await fetch(apiUrl, {
         method: 'POST',
         body: formData,
       });
