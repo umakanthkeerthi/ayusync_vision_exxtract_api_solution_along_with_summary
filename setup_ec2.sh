@@ -80,6 +80,8 @@ echo "=== [5/7] Building Frontend Static Assets ==="
 cd "$PROJECT_DIR/frontend"
 npm install
 npm run build
+chmod 755 "$HOME"
+chmod -R 755 "$PROJECT_DIR/frontend/dist"
 
 echo "=== [6/7] Configuring Nginx Reverse Proxy ==="
 NGINX_CONF="/etc/nginx/sites-available/ayusync"
