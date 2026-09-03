@@ -173,9 +173,34 @@ async def analyze_document(file: UploadFile = File(...)):
         if raw_text:
             agent_prompt = ""
             doc_type_lower = doc_type.lower()
-            if "prescription" in doc_type_lower or "rx" in doc_type_lower:
-                agent_prompt = "Extract a list of all medicine names from the following text. Respond strictly in JSON format: {\"medicines\": [\"med1\", \"med2\"]}"
-            elif "discharge" in doc_type_lower or "summary" in doc_type_lower or "discharge" in raw_text.lower()[:1000]:
+            raw_text_lower = raw_text.lower()
+
+            # Robust classification: Detect any discharge summary, card, or report
+            is_discharge = (
+                "discharge" in doc_type_lower
+                or "discharge" in raw_text_lower
+                or "post-discharge" in raw_text_lower
+                or "date of discharge" in raw_text_lower
+                or "discharged on" in raw_text_lower
+                or "condition at discharge" in raw_text_lower
+                or "discharge advice" in raw_text_lower
+                or "discharge medication" in raw_text_lower
+                or "discharge summary" in raw_text_lower
+                or ("admission" in raw_text_lower and "discharge" in raw_text_lower)
+            )
+
+            is_prescription = (
+                not is_discharge
+                and (
+                    "prescription" in doc_type_lower
+                    or "rx" in doc_type_lower
+                    or "rx\n" in raw_text_lower
+                    or "\nrx" in raw_text_lower
+                )
+            )
+
+            if is_discharge:
+                doc_type = "Discharge Summary"
                 agent_prompt = """You are an expert clinical data extraction assistant.
 Extract all clinical information from this hospital discharge summary into a standardized, consistent JSON structure.
 If any field or detail is not present in the document text, set it to null or an empty list. Do not invent details.
@@ -221,10 +246,14 @@ Respond strictly in JSON format matching this schema:
     }
   }
 }"""
+            elif is_prescription:
+                doc_type = "Prescription"
+                agent_prompt = "Extract a list of all medicine names from the following text. Respond strictly in JSON format: {\"medicines\": [\"med1\", \"med2\"]}"
             elif "lab" in doc_type_lower or "bill" in doc_type_lower or "report" in doc_type_lower:
                 agent_prompt = "Extract key values (like test results or billing amounts) from this text. Respond strictly in JSON format: {\"values\": {\"Key\": \"Value\"}}"
             elif doc_type != "Unknown" and doc_type != "Other":
                 agent_prompt = "Extract key values and important details from this text. Respond strictly in JSON format: {\"values\": {\"Key\": \"Value\"}}"
+
                 
             if agent_prompt:
                 try:
