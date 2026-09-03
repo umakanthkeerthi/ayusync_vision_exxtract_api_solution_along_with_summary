@@ -1,157 +1,342 @@
-# Ayusync Medical Document Analysis API Documentation
+# Ayusync Medical Document Intelligence API
+## Main Solution Integration Specification & Documentation
 
-## Overview
-
-The **Ayusync Document Analysis API** is a high-performance, decoupled microservice designed to ingest medical documents (images and multi-page PDFs), extract text verbatim using Vision Language Models (VLM), and perform intelligent, domain-specific structuring using an agentic LLM workflow.
-
-This service is designed to be consumed directly by external backends, mobile applications, web applications, or workflow orchestrators.
+This document specifies the integration contract for connecting your **Main Solution** (backend, mobile app, or web application) to the **Ayusync Medical Document Analysis API** hosted live on AWS EC2.
 
 ---
 
-## Service Endpoints & Base URL
+## 1. Quick Reference & Endpoints
 
-| Environment | Base URL | Interactive Docs (Swagger UI) | Alternative Docs (ReDoc) |
+| Environment | Base URL | Endpoint URL | Interactive Swagger Docs | OpenAPI 3.1 Spec |
+| :--- | :--- | :--- | :--- | :--- |
+| **AWS EC2 (Production Live)** | `http://13.53.200.2` | `POST http://13.53.200.2/api/analyze` | [http://13.53.200.2/docs](http://13.53.200.2/docs) | [http://13.53.200.2/openapi.json](http://13.53.200.2/openapi.json) |
+| **Local Development** | `http://localhost:8000` | `POST http://localhost:8000/api/analyze` | `http://localhost:8000/docs` | `http://localhost:8000/openapi.json` |
+
+* **Port**: Runs on standard HTTP **Port 80** in production (managed by Nginx reverse proxy).
+* **CORS**: Enabled (`*`) for all origins, headers, and HTTP methods.
+* **Authentication**: Currently open for internal microservice communication.
+
+---
+
+## 2. Request Specification
+
+### Endpoint: `POST /api/analyze`
+
+Accepts a medical document (PDF or image), extracts verbatim text across all pages via high-resolution Vision models, and returns structured clinical data.
+
+#### Headers
+```http
+Content-Type: multipart/form-data
+Accept: application/json
+```
+
+#### Form-Data Body Parameters
+
+| Field | Type | Required | Description |
 | :--- | :--- | :--- | :--- |
-| **Local Development** | `http://localhost:8000` | [http://localhost:8000/docs](http://localhost:8000/docs) | [http://localhost:8000/redoc](http://localhost:8000/redoc) |
-| **Network / LAN** | `http://<server-ip>:8000` | `http://<server-ip>:8000/docs` | `http://<server-ip>:8000/redoc` |
+| `file` | `binary` | **Yes** | The document to analyze. Supported file extensions: `.pdf`, `.png`, `.jpg`, `.jpeg`, `.webp`, `.bmp`. |
+
+#### Ingestion Limits
+* **Maximum File Size**: 25 MB (configured in Nginx `client_max_body_size`).
+* **Multi-Page PDFs**: Automatically split, rendered at 2x scaling, and processed page-by-page. For optimal latency, PDFs under 10 pages are recommended.
+* **Recommended Client Timeout**: **30 to 60 seconds** (multi-page vision inference may take 5–15 seconds depending on document length).
 
 ---
 
-## Authentication & Headers
+## 3. Response Specification
 
-* **Current Status**: Open / No authentication (configured for private microservice networks).
-* **Cross-Origin Resource Sharing (CORS)**: Enabled (`*`) for all origins, headers, and methods.
+The API returns a JSON object adhering to the schema below.
 
----
-
-## API Specification
-
-### Analyze Document
-
-Extracts verbatim OCR text and parses structured medical entities from an uploaded image or PDF document.
-
-* **URL**: `/api/analyze`
-* **Method**: `POST`
-* **Content-Type**: `multipart/form-data`
-
-#### Request Parameters
-
-| Parameter | Type | Required | Description |
-| :--- | :--- | :--- | :--- |
-| `file` | `binary` | **Yes** | The document to analyze. Supported file formats: `.pdf`, `.png`, `.jpg`, `.jpeg`, `.webp`, `.bmp`. |
-
-#### Supported Document Types & Processing Pipelines
-
-The service executes a **two-step pipeline**:
-
-1. **OCR Extraction (Vision Model)**:
-   * **PDFs**: Automatically converted into high-resolution images page-by-page (rendered at 2x scaling via PyMuPDF).
-   * **Images**: Resized if needed (max 2048x2048) and base64-encoded.
-   * Document type is categorized (e.g., `Prescription`, `Discharge Summary`, `Lab Report`, `Bill`).
-   * Complete text is extracted verbatim across all pages.
-
-2. **Agentic Structuring (LLM Step)**:
-   Depending on the detected document classification, a specialized structuring pass is triggered:
-   * **Prescriptions (`Rx`)**: Extracts a list of medications.
-   * **Discharge Summaries**: Synthesizes a clinical summary and generates an actionable post-discharge care plan.
-   * **Lab Reports / Invoices / Bills**: Extracts key metrics, values, and billing amounts into key-value pairs.
-
----
-
-### Response Schemas
-
-#### Success Response: `200 OK`
-
-Content-Type: `application/json`
+### 3.1 Response JSON Schema Overview
 
 ```json
 {
   "document_type": "string",
   "extracted_text": "string",
-  "medicines": ["string", "string"],
-  "summary": "string | null",
-  "care_plan": "string | null",
-  "values": {
-    "key": "value"
-  },
+  "discharge_data": { ... } | null,
+  "medicines": ["string"] | null,
+  "summary": "string" | null,
+  "care_plan": "string" | null,
+  "values": { "key": "value" } | null
+}
+```
+
+### 3.2 Field Definitions
+
+| Field Name | Type | Nullable | Populated When | Description |
+| :--- | :--- | :--- | :--- | :--- |
+| `document_type` | `string` | No | Always | Detected category: `"Discharge Summary"`, `"Prescription"`, `"Lab Report"`, or `"Medical Bill"`. |
+| `extracted_text` | `string` | No | Always | Complete, unedited verbatim OCR transcription of all document pages. |
+| `discharge_data` | `object` | **Yes** | `document_type == "Discharge Summary"` | Standardized clinical object containing patient details, diagnoses, surgeries, medications, and recovery care plan. |
+| `medicines` | `array[string]`| **Yes** | Prescriptions & Discharge Summaries | Array of medication names extracted from the document. |
+| `summary` | `string` | **Yes** | Discharge Summaries | Concise narrative overview of diagnosis, hospital course, and discharge status. |
+| `care_plan` | `string` | **Yes** | Discharge Summaries | Concise narrative overview of recovery instructions and precautions. |
+| `values` | `object` | **Yes** | Lab Reports & Bills | Key-value dictionary of clinical test metrics (e.g. `{"Hemoglobin": "14.2 g/dL"}`) or billing amounts. |
+
+---
+
+## 4. Standardized `discharge_data` Schema
+
+Whenever any hospital discharge summary, discharge card, inpatient summary, or post-operative summary is uploaded, `discharge_data` is populated with this exact schema:
+
+```json
+{
   "discharge_data": {
     "patient_info": {
-      "name": "string | null",
-      "age": "string | null",
-      "gender": "string | null",
-      "hospital_name": "string | null",
-      "admission_date": "string | null",
-      "discharge_date": "string | null"
+      "name": "Patient full name or null",
+      "age": "Patient age or null (e.g. '16' or '50 Years')",
+      "gender": "Patient gender or null (e.g. 'Male' or 'M')",
+      "hospital_name": "Hospital / Clinic name or null",
+      "admission_date": "Admission date string or null",
+      "discharge_date": "Discharge date string or null"
     },
-    "diagnosis": "string | null",
-    "procedures": ["string"],
-    "hospital_course": "string | null",
-    "condition_at_discharge": "string | null",
+    "diagnosis": "Primary clinical diagnosis string or null",
+    "procedures": [
+      "Array of surgeries or procedures performed with dates"
+    ],
+    "hospital_course": "Summary of treatment and clinical course during hospital stay",
+    "condition_at_discharge": "Patient stability/status upon discharge (e.g. 'Hemodynamically stable')",
     "discharge_medications": [
       {
-        "name": "string",
-        "dosage": "string | null",
-        "frequency": "string | null",
-        "duration": "string | null",
-        "instructions": "string | null"
+        "name": "Medicine name and strength",
+        "dosage": "e.g. '1 tablet'",
+        "frequency": "e.g. 'Twice daily (morning and night)'",
+        "duration": "e.g. '7 days'",
+        "instructions": "e.g. 'Take with food'"
       }
     ],
     "care_plan": {
-      "activity_restrictions": ["string"],
-      "dietary_instructions": "string | null",
-      "physiotherapy": ["string"],
-      "wound_care": "string | null",
-      "warning_signs": ["string"],
-      "emergency_contact": "string | null"
+      "activity_restrictions": [
+        "Array of physical restrictions, brace usage, limb elevation instructions"
+      ],
+      "dietary_instructions": "Diet guidance string or null",
+      "physiotherapy": [
+        "Array of step-by-step physiotherapy milestones and exercises"
+      ],
+      "wound_care": "Dressing and surgical site hygiene guidance or null",
+      "warning_signs": [
+        "Array of red flags and symptoms requiring urgent medical attention"
+      ],
+      "emergency_contact": "Emergency phone number or contact advice or null"
     },
     "follow_up": {
-      "date": "string | null",
-      "department_or_doctor": "string | null",
-      "instructions": "string | null"
+      "date": "Review appointment date or null",
+      "department_or_doctor": "Department or doctor name or null",
+      "instructions": "Follow-up instructions (e.g. 'Suture removal and wound inspection')"
     }
   }
 }
 ```
 
-#### Field Descriptions
-
-| Field | Type | Nullable | Description |
-| :--- | :--- | :--- | :--- |
-| `document_type` | `string` | No | Detected document category (e.g. `Prescription`, `Discharge Summary`, `Lab Report`, `Medical Bill`, `Unknown`). |
-| `extracted_text` | `string` | No | Complete, unedited verbatim text extracted from the document (multi-page documents include page markers: `--- Page X ---`). |
-| `discharge_data` | `object` | Yes | **Standardized Clinical Discharge Object** populated whenever a Discharge Summary is processed. Contains dedicated typed sub-objects for patient info, diagnosis, surgeries, medications schedule, recovery care plan, and follow-up. |
-| `medicines` | `array[string]` | Yes | Populated for prescriptions and discharge summaries. Array of drug / medication names. |
-| `summary` | `string` | Yes | Populated for discharge summaries. Concise narrative summary of diagnosis, stay, and procedures. |
-| `care_plan` | `string` | Yes | Populated for discharge summaries. Narrative summary of post-discharge instructions and precautions. |
-| `values` | `object` | Yes | Populated for lab reports and bills. Key-value mapping of detected medical parameters, test values, or charges. |
-
 ---
 
-### Response Examples
+## 5. Copy-Paste Client Type Definitions for Your Main Solution
 
-#### Example 1: Prescription Document
+### TypeScript / JavaScript (Node.js, Next.js, NestJS, Express)
 
-```json
-{
-  "document_type": "Prescription",
-  "extracted_text": "Dr. Sarah Smith, MD\nPatient: John Doe, Age: 45\nRx:\n1. Amoxicillin 500mg - 1 tablet three times daily for 7 days\n2. Ibuprofen 400mg - as needed for pain\nRefills: 0",
-  "medicines": [
-    "Amoxicillin 500mg",
-    "Ibuprofen 400mg"
-  ],
-  "summary": null,
-  "care_plan": null,
-  "values": null,
-  "discharge_data": null
+```typescript
+export interface PatientInfo {
+  name: string | null;
+  age: string | null;
+  gender: string | null;
+  hospital_name: string | null;
+  admission_date: string | null;
+  discharge_date: string | null;
+}
+
+export interface DischargeMedicationItem {
+  name: string;
+  dosage: string | null;
+  frequency: string | null;
+  duration: string | null;
+  instructions: string | null;
+}
+
+export interface CarePlanDetails {
+  activity_restrictions: string[] | null;
+  dietary_instructions: string | null;
+  physiotherapy: string[] | null;
+  wound_care: string | null;
+  warning_signs: string[] | null;
+  emergency_contact: string | null;
+}
+
+export interface FollowUpDetails {
+  date: string | null;
+  department_or_doctor: string | null;
+  instructions: string | null;
+}
+
+export interface DischargeSummaryDetails {
+  patient_info: PatientInfo | null;
+  diagnosis: string | null;
+  procedures: string[] | null;
+  hospital_course: string | null;
+  condition_at_discharge: string | null;
+  discharge_medications: DischargeMedicationItem[] | null;
+  care_plan: CarePlanDetails | null;
+  follow_up: FollowUpDetails | null;
+}
+
+export interface AyusyncOCRResponse {
+  document_type: 'Discharge Summary' | 'Prescription' | 'Lab Report' | 'Medical Bill' | string;
+  extracted_text: string;
+  discharge_data: DischargeSummaryDetails | null;
+  medicines: string[] | null;
+  summary: string | null;
+  care_plan: string | null;
+  values: Record<string, string> | null;
 }
 ```
 
-#### Example 2: Hospital Discharge Summary (Standardized Schema)
+### Python (Pydantic / FastAPI / Django)
+
+```python
+from typing import Optional, List, Dict
+from pydantic import BaseModel
+
+class PatientInfo(BaseModel):
+    name: Optional[str] = None
+    age: Optional[str] = None
+    gender: Optional[str] = None
+    hospital_name: Optional[str] = None
+    admission_date: Optional[str] = None
+    discharge_date: Optional[str] = None
+
+class DischargeMedicationItem(BaseModel):
+    name: str
+    dosage: Optional[str] = None
+    frequency: Optional[str] = None
+    duration: Optional[str] = None
+    instructions: Optional[str] = None
+
+class CarePlanDetails(BaseModel):
+    activity_restrictions: Optional[List[str]] = None
+    dietary_instructions: Optional[str] = None
+    physiotherapy: Optional[List[str]] = None
+    wound_care: Optional[str] = None
+    warning_signs: Optional[List[str]] = None
+    emergency_contact: Optional[str] = None
+
+class FollowUpDetails(BaseModel):
+    date: Optional[str] = None
+    department_or_doctor: Optional[str] = None
+    instructions: Optional[str] = None
+
+class DischargeSummaryDetails(BaseModel):
+    patient_info: Optional[PatientInfo] = None
+    diagnosis: Optional[str] = None
+    procedures: Optional[List[str]] = None
+    hospital_course: Optional[str] = None
+    condition_at_discharge: Optional[str] = None
+    discharge_medications: Optional[List[DischargeMedicationItem]] = None
+    care_plan: Optional[CarePlanDetails] = None
+    follow_up: Optional[FollowUpDetails] = None
+
+class AyusyncOCRResponse(BaseModel):
+    document_type: str
+    extracted_text: str
+    discharge_data: Optional[DischargeSummaryDetails] = None
+    medicines: Optional[List[str]] = None
+    summary: Optional[str] = None
+    care_plan: Optional[str] = None
+    values: Optional[Dict[str, str]] = None
+```
+
+---
+
+## 6. Integration Code Examples for Your Main Solution
+
+### 6.1 Node.js / TypeScript (`fetch`)
+
+```typescript
+import fs from 'fs';
+import path from 'path';
+
+const AYUSYNC_API_URL = process.env.AYUSYNC_API_URL || 'http://13.53.200.2/api/analyze';
+
+export async function analyzeMedicalDocument(filePath: string) {
+  const fileBuffer = fs.readFileSync(filePath);
+  const fileName = path.basename(filePath);
+
+  const formData = new FormData();
+  formData.append('file', new Blob([fileBuffer]), fileName);
+
+  const response = await fetch(AYUSYNC_API_URL, {
+    method: 'POST',
+    body: formData,
+    signal: AbortSignal.timeout(60000), // 60s timeout
+  });
+
+  if (!response.ok) {
+    const errorBody = await response.text();
+    throw new Error(`Ayusync API error (${response.status}): ${errorBody}`);
+  }
+
+  const data = await response.json();
+  return data;
+}
+
+// Example usage:
+// const result = await analyzeMedicalDocument('./patient_discharge.pdf');
+// if (result.document_type === 'Discharge Summary') {
+//   console.log('Patient Name:', result.discharge_data?.patient_info?.name);
+//   console.log('Medications:', result.discharge_data?.discharge_medications);
+// }
+```
+
+---
+
+### 6.2 Python (`requests` / `httpx`)
+
+```python
+import requests
+
+AYUSYNC_API_URL = "http://13.53.200.2/api/analyze"
+
+def analyze_medical_document(file_path: str) -> dict:
+    with open(file_path, "rb") as doc_file:
+        files = {"file": (file_path, doc_file, "application/octet-stream")}
+        response = requests.post(AYUSYNC_API_URL, files=files, timeout=60)
+        
+        response.raise_for_status()
+        return response.json()
+
+# Example usage:
+if __name__ == "__main__":
+    result = analyze_medical_document("discharge_summary.pdf")
+    print("Detected Document Type:", result["document_type"])
+    
+    if result["document_type"] == "Discharge Summary" and result.get("discharge_data"):
+        data = result["discharge_data"]
+        print("Patient Name:", data.get("patient_info", {}).get("name"))
+        print("Diagnosis:", data.get("diagnosis"))
+        print("Medications:")
+        for med in data.get("discharge_medications", []):
+            print(f" - {med['name']}: {med.get('dosage')} {med.get('frequency')}")
+```
+
+---
+
+### 6.3 cURL (Command Line)
+
+```bash
+# Upload and analyze document
+curl -X POST "http://13.53.200.2/api/analyze" \
+     -H "Accept: application/json" \
+     -F "file=@/path/to/discharge_summary.pdf"
+```
+
+---
+
+## 7. Sample API Responses
+
+### 7.1 Discharge Summary Response (`discharge_data`)
 
 ```json
 {
   "document_type": "Discharge Summary",
-  "extracted_text": "AIMS General Hospital\nMr. Palusa Sai Charan, 16-year-old male...\nAdmitted: 25 Apr 2023, Discharged: 05 May 2023...",
+  "extracted_text": "AIMS General Hospital\nPatient Name: Mr. Palusa Sai Charan, Age: 16, Sex: Male...",
   "discharge_data": {
     "patient_info": {
       "name": "Mr. Palusa Sai Charan",
@@ -236,12 +421,34 @@ Content-Type: `application/json`
 }
 ```
 
-#### Example 3: Lab Test / Bill Report
+---
+
+### 7.2 Prescription Document Response (`medicines`)
+
+```json
+{
+  "document_type": "Prescription",
+  "extracted_text": "Dr. Sarah Smith, MD\nPatient: John Doe, Age: 45\nRx:\n1. Amoxicillin 500mg - 1 tab TID x 7 days\n2. Paracetamol 650mg - 1 tab SOS",
+  "discharge_data": null,
+  "medicines": [
+    "Amoxicillin 500mg",
+    "Paracetamol 650mg"
+  ],
+  "summary": null,
+  "care_plan": null,
+  "values": null
+}
+```
+
+---
+
+### 7.3 Lab Test / Bill Response (`values`)
 
 ```json
 {
   "document_type": "Lab Report",
-  "extracted_text": "Pathology Labs Inc.\nComplete Blood Count (CBC)\nHemoglobin: 14.2 g/dL (Ref: 13.8 - 17.2)\nWBC: 6,800 /uL (Ref: 4,500 - 11,000)\nPlatelets: 240,000 /uL (Ref: 150,000 - 450,000)",
+  "extracted_text": "Complete Blood Count (CBC)\nHemoglobin: 14.2 g/dL\nWBC: 6,800 /uL\nPlatelets: 240,000 /uL",
+  "discharge_data": null,
   "medicines": null,
   "summary": null,
   "care_plan": null,
@@ -255,185 +462,13 @@ Content-Type: `application/json`
 
 ---
 
-### Error Responses
+## 8. HTTP Status Codes & Error Handling
 
-| Status Code | Description | Example Payload |
-| :--- | :--- | :--- |
-| **`422 Unprocessable Entity`** | The `file` parameter is missing or improperly formed. | `{"detail": [{"loc": ["body", "file"], "msg": "Field required", "type": "missing"}]}` |
-| **`500 Internal Server Error`** | Processing failed (e.g. corrupt file, invalid image format, or LLM failure). | `{"detail": "Invalid image file: cannot identify image file"}` |
-
----
-
-## Integration Code Examples
-
-### 1. Python (`requests`)
-
-```python
-import requests
-
-API_URL = "http://localhost:8000/api/analyze"
-FILE_PATH = "sample_prescription.jpg"
-
-def analyze_medical_document(file_path: str):
-    with open(file_path, "rb") as document_file:
-        files = {"file": (file_path, document_file, "image/jpeg")}
-        response = requests.post(API_URL, files=files, timeout=60)
-        
-        response.raise_for_status()
-        return response.json()
-
-if __name__ == "__main__":
-    result = analyze_medical_document(FILE_PATH)
-    print("Detected Document:", result["document_type"])
-    print("Extracted Text:\n", result["extracted_text"])
-    
-    if result.get("medicines"):
-        print("Prescribed Medicines:", result["medicines"])
-    if result.get("values"):
-        print("Values:", result["values"])
-```
-
----
-
-### 2. Node.js / TypeScript (`fetch`)
-
-```typescript
-import fs from 'fs';
-import path from 'path';
-
-async function analyzeDocument(filePath: string) {
-  const url = 'http://localhost:8000/api/analyze';
-  const fileBuffer = fs.readFileSync(filePath);
-  const fileName = path.basename(filePath);
-
-  const formData = new FormData();
-  formData.append(
-    'file',
-    new Blob([fileBuffer], { type: 'application/pdf' }),
-    fileName
-  );
-
-  const response = await fetch(url, {
-    method: 'POST',
-    body: formData,
-  });
-
-  if (!response.ok) {
-    const error = await response.text();
-    throw new Error(`Analysis failed (${response.status}): ${error}`);
-  }
-
-  const data = await response.json();
-  return data;
-}
-
-// Example usage
-analyzeDocument('./patient_discharge.pdf')
-  .then((data) => console.log('Analysis Result:', data))
-  .catch((err) => console.error(err));
-```
-
----
-
-### 3. cURL (Command Line)
-
-```bash
-# Analyze an image
-curl -X POST "http://localhost:8000/api/analyze" \
-  -H "Accept: application/json" \
-  -F "file=@/path/to/prescription.jpg"
-
-# Analyze a multi-page PDF
-curl -X POST "http://localhost:8000/api/analyze" \
-  -H "Accept: application/json" \
-  -F "file=@/path/to/discharge_summary.pdf"
-```
-
----
-
-### 4. Go
-
-```go
-package main
-
-import (
-	"bytes"
-	"fmt"
-	"io"
-	"mime/multipart"
-	"net/http"
-	"os"
-	"path/filepath"
-)
-
-func analyzeDocument(url string, filePath string) (string, error) {
-	file, err := os.Open(filePath)
-	if err != nil {
-		return "", err
-	}
-	defer file.Close()
-
-	body := &bytes.Buffer{}
-	writer := multipart.NewWriter(body)
-	part, err := writer.CreateFormFile("file", filepath.Base(filePath))
-	if err != nil {
-		return "", err
-	}
-	_, err = io.Copy(part, file)
-	if err != nil {
-		return "", err
-	}
-	writer.Close()
-
-	req, err := http.NewRequest("POST", url, body)
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Content-Type", writer.FormDataContentType())
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	respBody, _ := io.ReadAll(resp.Body)
-	return string(respBody), nil
-}
-```
-
----
-
-## Deployment & Configuration
-
-### Environment Variables
-
-Configure these variables in [`backend/.env`](file:///c:/ocr-analysis/backend/.env):
-
-| Variable | Required | Default | Description |
+| HTTP Status Code | Meaning | Cause | Action |
 | :--- | :--- | :--- | :--- |
-| `GROQ_API_KEY` | **Yes** | None | API key obtained from [console.groq.com](https://console.groq.com) for high-speed inference. |
+| **`200 OK`** | Success | Document processed successfully. | Parse the JSON response. |
+| **`422 Unprocessable Entity`** | Validation Error | Missing the `file` parameter or body is not `multipart/form-data`. | Ensure form key is named `"file"`. |
+| **`500 Internal Server Error`** | Processing Error | Corrupted image/PDF or upstream inference error. | Check document integrity; retry with exponential backoff. |
 
-### Running the Server
-
-To launch the backend API service:
-
-```bash
-# In c:/ocr-analysis/backend with activated venv:
-uvicorn main:app --host 0.0.0.0 --port 8000
-```
-
-For production deployment with multiple workers:
-
-```bash
-uvicorn main:app --host 0.0.0.0 --port 8000 --workers 4
-```
-
----
-
-## Best Practices for Main Solution Integration
-
-1. **Timeouts**: Medical PDFs with multiple pages can require several seconds for page-by-page vision OCR. We recommend a client timeout setting of **at least 30 to 60 seconds**.
-2. **File Size & Page Limits**: For optimum latency, limit single PDF uploads to 10 pages or fewer at a time.
-3. **Retry Strategy**: Implement exponential backoff for HTTP 500/503 responses to handle upstream LLM rate limits gracefully.
+### Recommended Retry Strategy
+For HTTP 500/503 errors (e.g. temporary network blips or LLM rate limits), implement exponential backoff with up to 3 retries (1s, 2s, 4s).
