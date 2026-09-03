@@ -26,6 +26,49 @@ app.add_middleware(
 # Initialize Groq client (automatically uses GROQ_API_KEY from env)
 client = Groq()
 
+class PatientInfo(BaseModel):
+    name: Optional[str] = None
+    age: Optional[str] = None
+    gender: Optional[str] = None
+    hospital_name: Optional[str] = None
+    admission_date: Optional[str] = None
+    discharge_date: Optional[str] = None
+
+
+class DischargeMedicationItem(BaseModel):
+    name: str
+    dosage: Optional[str] = None
+    frequency: Optional[str] = None
+    duration: Optional[str] = None
+    instructions: Optional[str] = None
+
+
+class CarePlanDetails(BaseModel):
+    activity_restrictions: Optional[List[str]] = None
+    dietary_instructions: Optional[str] = None
+    physiotherapy: Optional[List[str]] = None
+    wound_care: Optional[str] = None
+    warning_signs: Optional[List[str]] = None
+    emergency_contact: Optional[str] = None
+
+
+class FollowUpDetails(BaseModel):
+    date: Optional[str] = None
+    department_or_doctor: Optional[str] = None
+    instructions: Optional[str] = None
+
+
+class DischargeSummaryDetails(BaseModel):
+    patient_info: Optional[PatientInfo] = None
+    diagnosis: Optional[str] = None
+    procedures: Optional[List[str]] = None
+    hospital_course: Optional[str] = None
+    condition_at_discharge: Optional[str] = None
+    discharge_medications: Optional[List[DischargeMedicationItem]] = None
+    care_plan: Optional[CarePlanDetails] = None
+    follow_up: Optional[FollowUpDetails] = None
+
+
 class OCRResponse(BaseModel):
     document_type: str
     extracted_text: str
@@ -33,6 +76,8 @@ class OCRResponse(BaseModel):
     summary: Optional[str] = None
     care_plan: Optional[str] = None
     values: Optional[Dict[str, str]] = None
+    discharge_data: Optional[DischargeSummaryDetails] = None
+
 
 
 def encode_image(image: Image.Image) -> str:
@@ -131,7 +176,51 @@ async def analyze_document(file: UploadFile = File(...)):
             if "prescription" in doc_type_lower or "rx" in doc_type_lower:
                 agent_prompt = "Extract a list of all medicine names from the following text. Respond strictly in JSON format: {\"medicines\": [\"med1\", \"med2\"]}"
             elif "discharge" in doc_type_lower or "summary" in doc_type_lower or "discharge" in raw_text.lower()[:1000]:
-                agent_prompt = "Provide a concise summary of this document AND create a post-discharge care plan based on the text. Respond strictly in JSON format: {\"summary\": \"...\", \"care_plan\": \"...\"}"
+                agent_prompt = """You are an expert clinical data extraction assistant.
+Extract all clinical information from this hospital discharge summary into a standardized, consistent JSON structure.
+If any field or detail is not present in the document text, set it to null or an empty list. Do not invent details.
+
+Respond strictly in JSON format matching this schema:
+{
+  "summary": "A concise 2-3 sentence overview of patient admission, diagnosis, procedures, and discharge condition.",
+  "care_plan": "A concise overview paragraph summarizing post-discharge instructions and precautions.",
+  "discharge_data": {
+    "patient_info": {
+      "name": "Patient full name or null",
+      "age": "Patient age or null",
+      "gender": "Patient gender or null",
+      "hospital_name": "Hospital or clinic name or null",
+      "admission_date": "Admission date or null",
+      "discharge_date": "Discharge date or null"
+    },
+    "diagnosis": "Primary and secondary diagnoses or null",
+    "procedures": ["Surgeries, interventions, or procedures performed, or empty list"],
+    "hospital_course": "Summary of treatment given during the hospital stay or null",
+    "condition_at_discharge": "Patient status upon discharge (e.g. Hemodynamically stable) or null",
+    "discharge_medications": [
+      {
+        "name": "Medicine name and strength",
+        "dosage": "e.g. 1 tablet",
+        "frequency": "e.g. twice daily / after food",
+        "duration": "e.g. 7 days",
+        "instructions": "Specific administration advice or empty string"
+      }
+    ],
+    "care_plan": {
+      "activity_restrictions": ["Physical activity restrictions, limb elevation, brace usage, etc."],
+      "dietary_instructions": "Diet instructions or null",
+      "physiotherapy": ["Step-by-step physiotherapy, ROM milestones, or exercises"],
+      "wound_care": "Wound dressing, hygiene, and inspection advice or null",
+      "warning_signs": ["Complications, red flags, or symptoms requiring immediate attention"],
+      "emergency_contact": "Emergency phone number or contact advice or null"
+    },
+    "follow_up": {
+      "date": "Review / appointment date or null",
+      "department_or_doctor": "Doctor or department name or null",
+      "instructions": "Follow-up purpose like suture removal, labs, or checks"
+    }
+  }
+}"""
             elif "lab" in doc_type_lower or "bill" in doc_type_lower or "report" in doc_type_lower:
                 agent_prompt = "Extract key values (like test results or billing amounts) from this text. Respond strictly in JSON format: {\"values\": {\"Key\": \"Value\"}}"
             elif doc_type != "Unknown" and doc_type != "Other":
@@ -153,13 +242,26 @@ async def analyze_document(file: UploadFile = File(...)):
                 except Exception as ex:
                     print(f"Agent step failed: {ex}")
 
+        discharge_data = None
+        if "discharge_data" in structured_data and isinstance(structured_data["discharge_data"], dict):
+            try:
+                discharge_data = DischargeSummaryDetails(**structured_data["discharge_data"])
+            except Exception as e:
+                print(f"Failed to parse DischargeSummaryDetails: {e}")
+                discharge_data = None
+
+        medicines = structured_data.get("medicines")
+        if not medicines and discharge_data and discharge_data.discharge_medications:
+            medicines = [m.name for m in discharge_data.discharge_medications if m.name]
+
         return OCRResponse(
             document_type=doc_type,
             extracted_text=raw_text,
-            medicines=structured_data.get("medicines"),
+            medicines=medicines,
             summary=structured_data.get("summary"),
             care_plan=structured_data.get("care_plan"),
-            values=structured_data.get("values")
+            values=structured_data.get("values"),
+            discharge_data=discharge_data
         )
         
     except Exception as e:
